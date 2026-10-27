@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PhotoCoque — kiosque client</title>
+<!--
+  Kiosque client (comme l'écran tactile du kiosque Photomaton).
+  1) choisir un visuel  2) choisir son modèle de téléphone  3) commander et suivre sa coque.
+  Publie : photocoque/commande/new {cmd, modele, visuel, src:"web"}
+  Suit sa commande : photocoque/poste/+/piece et photocoque/qualite/resultat
+  La photo personnelle reste dans le navigateur : seul le mot « photo-perso » est envoyé.
+-->
+<script src="lib/mqtt.min.js"></script>
+<style>
+:root{--fond:#fff4e6;--carte:#ffffff;--encre:#2a1d14;--gris:#7a6a5d;--orange:#ff8a1f;--rose:#e8338a;--vert:#1f9d55;--rouge:#d22f2f;--trait:#f0dcc6;color-scheme:light}
+@media (prefers-color-scheme: dark){:root{--fond:#21170f;--carte:#2e2219;--encre:#fbefe3;--gris:#c2ae9c;--trait:#4a3829;color-scheme:dark}}
+*{box-sizing:border-box}html,body{margin:0}
+body{background:var(--fond);color:var(--encre);font-family:Bahnschrift,"Segoe UI",Roboto,Arial,sans-serif;font-size:16px}
+header{padding:18px 20px 6px;text-align:center}
+header h1{margin:0;font-size:30px;font-weight:800;color:var(--rose);text-shadow:2px 2px 0 var(--orange)}
+header p{margin:4px 0 0;color:var(--gris)}
+main{max-width:980px;margin:0 auto;padding:10px 18px 40px;display:grid;grid-template-columns:minmax(220px,300px) 1fr;gap:22px}
+@media (max-width:720px){main{grid-template-columns:1fr}}
+.apercu{position:sticky;top:12px;align-self:start;text-align:center}
+.coque{width:200px;aspect-ratio:9/18.5;margin:0 auto;border-radius:30px;border:6px solid #222;position:relative;overflow:hidden;background:#ddd;background-size:cover;background-position:center;box-shadow:0 10px 30px rgba(120,60,0,.25)}
+.coque .cam{position:absolute;top:12px;left:12px;width:64px;height:64px;border-radius:18px;background:#1b1b1b;box-shadow:inset 0 0 0 3px #333}
+.coque .cam::before,.coque .cam::after{content:"";position:absolute;width:22px;height:22px;border-radius:50%;background:#333;box-shadow:inset 0 0 0 4px #555}
+.coque .cam::before{top:8px;left:8px}.coque .cam::after{bottom:8px;right:8px}
+.prix{display:inline-block;margin-top:14px;background:var(--rouge);color:#fff;border-radius:50%;width:84px;height:84px;padding-top:20px;font-weight:800;font-size:24px;line-height:1}
+.prix small{display:block;font-size:11px;font-weight:600}
+.etape{background:var(--carte);border:1px solid var(--trait);border-radius:16px;padding:14px 16px;margin-bottom:14px}
+.etape h2{margin:0 0 10px;font-size:18px}
+.etape h2 span{display:inline-block;width:28px;height:28px;border-radius:50%;background:var(--orange);color:#fff;text-align:center;line-height:28px;margin-right:8px}
+.visuels{display:grid;grid-template-columns:repeat(auto-fill,minmax(78px,1fr));gap:10px}
+.visuels button{height:96px;border-radius:12px;border:3px solid transparent;cursor:pointer;background-size:cover;font:inherit;font-size:12px;color:#fff;font-weight:700;text-shadow:0 1px 3px #000;display:flex;align-items:flex-end;justify-content:center;padding-bottom:6px}
+.visuels button[aria-pressed=true]{border-color:var(--rose)}
+select,input{font:inherit;padding:9px 10px;border-radius:10px;border:1px solid var(--trait);background:var(--carte);color:var(--encre);width:100%}
+.go{width:100%;padding:14px;border:0;border-radius:14px;background:var(--vert);color:#fff;font:inherit;font-size:19px;font-weight:800;cursor:pointer}
+.go:disabled{opacity:.5;cursor:default}
+button:focus-visible,select:focus-visible,input:focus-visible{outline:3px solid var(--rose);outline-offset:2px}
+.suivi{display:grid;grid-template-columns:repeat(6,1fr);gap:4px;margin:12px 0 6px}
+.suivi div{text-align:center;font-size:11px;color:var(--gris)}
+.suivi div i{display:block;height:10px;border-radius:5px;background:var(--trait);margin-bottom:4px}
+.suivi div.fait i{background:var(--vert)}
+.suivi div.fait{color:var(--encre)}
+.statut{font-weight:700}
+.cnx{font-size:12px;color:var(--gris);text-align:center;margin-top:10px}
+.cnx input{width:130px;padding:4px 6px}
+</style>
+</head>
+<body>
+<header><h1>Coque personnalisée</h1><p>Choisissez votre visuel, personnalisez votre coque, récupérez-la à la sortie de la mini-usine.</p></header>
+<main>
+  <div class="apercu">
+    <div class="coque" id="coque"><div class="cam"></div></div>
+    <div class="prix">15 €<small>seulement</small></div>
+    <div class="cnx">Broker <input id="hote" aria-label="adresse du broker"> <span id="etatCnx">…</span></div>
+  </div>
+  <div>
+    <div class="etape"><h2><span>1</span>Choisissez votre visuel</h2>
+      <div class="visuels" id="visuels"></div>
+      <p style="margin:10px 0 0;font-size:14px">ou votre photo : <input type="file" accept="image/*" id="photo" style="width:auto"></p>
+    </div>
+    <div class="etape"><h2><span>2</span>Choisissez votre téléphone</h2>
+      <select id="modele" aria-label="modèle de téléphone"></select>
+    </div>
+    <div class="etape"><h2><span>3</span>Commandez et suivez votre coque</h2>
+      <input id="prenom" placeholder="Votre prénom (facultatif)" maxlength="20" aria-label="prénom" style="margin-bottom:10px">
+      <button class="go" id="commander">Personnaliser maintenant</button>
+      <div id="zoneSuivi" hidden>
+        <p class="statut" id="statut"></p>
+        <div class="suivi" id="suivi"></div>
+      </div>
+    </div>
+  </div>
+</main>
+<script>
+"use strict";
+const VISUELS = {
+  vague:"linear-gradient(160deg,#ff7a18,#ffb800 40%,#ff3d7f 75%,#7b2ff7)",
+  plage:"linear-gradient(180deg,#5ec8f2 0 45%,#2b8cc4 45% 60%,#f3d9a4 60%)",
+  chien:"radial-gradient(circle at 50% 42%,#d9a35b 0 22%,#b07a35 22% 30%,transparent 30%),linear-gradient(#9bd36b,#4f9a3a)",
+  fleurs:"radial-gradient(circle at 30% 30%,#ff5a8a 0 10%,transparent 11%),radial-gradient(circle at 70% 60%,#ff9f1c 0 12%,transparent 13%),radial-gradient(circle at 40% 80%,#e8338a 0 9%,transparent 10%),linear-gradient(#bfe8c5,#5fae6e)",
+  montagne:"linear-gradient(160deg,transparent 55%,#ffffff 55% 60%,#6d7f99 60%),linear-gradient(20deg,#4a5d78 50%,transparent 50%),linear-gradient(#8fd0ff,#e9f6ff)",
+  neon:"repeating-linear-gradient(135deg,#ff2bd6 0 14px,#2bf5ff 14px 28px,#1c1c3a 28px 42px)",
+  marbre:"radial-gradient(ellipse at 20% 30%,#ffffff,#d8d8de 40%,#a9a9b6 70%,#ececf2)",
+  rayures:"linear-gradient(90deg,#1e5fa8 0 35%,#ffffff 35% 65%,#1e5fa8 65%)"
+};
+const NOMS = {vague:"Vague", plage:"Plage", chien:"Mon chien", fleurs:"Fleurs", montagne:"Montagne", neon:"Néon", marbre:"Marbre", rayures:"Rayures"};
+const MODELES = ["iPhone 16 Pro","iPhone 16","iPhone 15","iPhone 14","iPhone 13","iPhone SE","Galaxy S24","Galaxy S23","Galaxy A55","Galaxy A35","Pixel 9","Pixel 8a","Redmi Note 13","Xiaomi 14"];
+const POSTES = ["Alimentation","Impression","Découpe","Pose robot","Contrôle","Emballage"];
+const $ = id => document.getElementById(id);
+let visuel = "vague", client = null, maCommande = null, etapeFaite = 0;
+
+for (const m of MODELES) { const o = document.createElement("option"); o.textContent = m; $("modele").append(o); }
+for (const [k, css] of Object.entries(VISUELS)) {
+  const b = document.createElement("button"); b.style.background = css; b.textContent = NOMS[k]; b.setAttribute("aria-pressed", k === visuel);
+  b.onclick = () => { visuel = k; $("coque").style.background = css; document.querySelectorAll(".visuels button").forEach(x => x.setAttribute("aria-pressed", x === b)); };
+  $("visuels").append(b);
+}
+$("coque").style.background = VISUELS[visuel];
+$("photo").onchange = e => { const f = e.target.files[0]; if (!f) return; const r = new FileReader();
+  r.onload = () => { visuel = "photo-perso"; $("coque").style.background = `center/cover url(${r.result})`; document.querySelectorAll(".visuels button").forEach(x => x.setAttribute("aria-pressed", false)); };
+  r.readAsDataURL(f); };
+
+// ---- MQTT ----
+let hote; try { hote = localStorage.getItem("pc_hote"); } catch(e){}
+$("hote").value = hote || location.hostname || "localhost";
+function connecter(){
+  const h = $("hote").value.trim() || "localhost"; try { localStorage.setItem("pc_hote", h); } catch(e){}
+  if (client) client.end(true);
+  client = mqtt.connect("ws://" + h + ":9001", { clientId: "kiosque-" + Math.random().toString(16).slice(2, 8), reconnectPeriod: 3000 });
+  client.on("connect", () => { $("etatCnx").textContent = "connecté"; client.subscribe(["photocoque/poste/+/piece", "photocoque/qualite/resultat"]); });
+  client.on("close", () => { $("etatCnx").textContent = "hors ligne"; });
+  client.on("message", (topic, buf) => {
+    if (!maCommande) return; let p; try { p = JSON.parse(buf.toString()); } catch(e){ return; }
+    if (p.cmd !== maCommande) return;
+    if (topic === "photocoque/qualite/resultat" && p.verdict === "NOK") { etapeFaite = 0; majSuivi("Petit défaut détecté (" + p.defaut + ") : on refait votre coque !"); return; }
+    const n = Number(topic.split("/")[2].slice(1));
+    if (n > etapeFaite) { etapeFaite = n; majSuivi(n === 6 ? "Votre coque est prête !" : "Étape terminée : " + POSTES[n - 1]); }
+    if (n === 6) { $("commander").disabled = false; $("commander").textContent = "Commander une autre coque"; }
+  });
+}
+$("hote").onchange = connecter;
+function majSuivi(txt){
+  $("statut").textContent = "Commande " + maCommande + " — " + txt;
+  $("suivi").innerHTML = POSTES.map((p, i) => `<div class="${i < etapeFaite ? "fait" : ""}"><i></i>${p}</div>`).join("");
+}
+$("commander").onclick = () => {
+  if (!client || !client.connected) { $("zoneSuivi").hidden = false; $("statut").textContent = "Kiosque hors ligne : vérifiez l'adresse du broker."; return; }
+  maCommande = "W" + Date.now().toString(36).slice(-4).toUpperCase();
+  etapeFaite = 0;
+  client.publish("photocoque/commande/new", JSON.stringify({ cmd: maCommande, modele: $("modele").value, visuel: visuel, prenom: $("prenom").value.trim(), src: "web" }));
+  $("zoneSuivi").hidden = false; majSuivi("en attente de lancement");
+  $("commander").disabled = true; $("commander").textContent = "Coque en fabrication…";
+};
+connecter();
+</script>
+</body>
+</html>

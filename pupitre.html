@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PhotoCoque Lab — pupitre des postes (mode RÉEL)</title>
+<!--
+  Pupitre opérateur : remplace les Tab5 des postes qui ne sont pas (encore) installés.
+  Il publie exactement les mêmes messages que PC_Poste / PC_Qualite :
+    photocoque/poste/Px/piece {cmd, ct}   photocoque/poste/Px/etat {etat, cause}
+    photocoque/qualite/resultat {cmd, verdict, defaut}
+  Les files d'attente de chaque poste sont reconstruites à partir des messages MQTT
+  (commande/new -> P1, P1/piece -> P2 … P4/piece -> P5, qualite OK -> P6, NOK -> retour en tête de P1).
+  Cocher « Tab5 » sur un poste équipé d'une Tab5 : ses boutons sont désactivés ici.
+-->
+<style>
+:root{--papier:#f6f7f9;--carte:#fff;--encre:#1c2430;--gris:#5b6675;--trait:#d9dee5;--zone:#eef1f5;
+  --cyan:#0097bd;--magenta:#c8236a;--jaune:#e9b800;--run:#1f9d55;--attente:#d99a00;--panne:#d22f2f;--maint:#2f6fd2;color-scheme:light}
+@media (prefers-color-scheme:dark){:root{--papier:#141a22;--carte:#1c2430;--encre:#e8edf3;--gris:#9aa6b4;--trait:#2e3a48;--zone:#222c39;color-scheme:dark}}
+*{box-sizing:border-box}html,body{margin:0}
+body{background:var(--papier);color:var(--encre);font:15px/1.4 Bahnschrift,"DIN Alternate","Segoe UI",Roboto,Arial,sans-serif}
+.cmjn{display:flex;height:6px}.cmjn i{flex:1}.cmjn i:nth-child(1){background:var(--cyan)}.cmjn i:nth-child(2){background:var(--magenta)}.cmjn i:nth-child(3){background:var(--jaune)}.cmjn i:nth-child(4){background:var(--encre)}
+header{display:flex;flex-wrap:wrap;align-items:center;gap:10px 20px;padding:12px 20px;background:var(--carte);border-bottom:1px solid var(--trait)}
+h1{font-size:21px;margin:0}h1 small{display:block;font-size:13px;font-weight:400;color:var(--gris)}
+.cnx{margin-left:auto;display:flex;gap:8px;align-items:center;font-size:13px}
+input,select,button{font:inherit;color:inherit}
+input,select{background:var(--carte);border:1px solid var(--trait);border-radius:6px;padding:5px 8px}
+button{border:0;border-radius:8px;padding:9px 12px;cursor:pointer;font-weight:700;background:var(--encre);color:var(--carte)}
+button:disabled{opacity:.35;cursor:not-allowed}
+button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid var(--cyan);outline-offset:2px}
+.pastille{width:11px;height:11px;border-radius:50%;background:var(--panne)}.pastille.ok{background:var(--run)}
+.banniere{margin:14px 20px 0;padding:10px 14px;border-radius:8px;background:color-mix(in srgb,var(--attente) 18%,var(--carte));border:1px solid var(--attente);display:none;align-items:center;gap:12px;flex-wrap:wrap}
+.banniere.vue{display:flex}
+main{padding:16px 20px 40px}
+.postes{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px}
+.poste{background:var(--carte);border:1px solid var(--trait);border-top:8px solid var(--gris);border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:8px}
+.poste.RUN{border-top-color:var(--run)}.poste.ATTENTE{border-top-color:var(--attente)}.poste.PANNE{border-top-color:var(--panne)}.poste.MAINT{border-top-color:var(--maint)}
+.poste h2{font-size:16px;margin:0;display:flex;justify-content:space-between;align-items:baseline}
+.poste h2 span{font-size:12px;font-weight:400;color:var(--gris)}
+.etat{font-size:13px;font-weight:700}
+.file{min-height:62px;background:var(--zone);border-radius:8px;padding:6px;display:flex;flex-wrap:wrap;gap:4px;align-content:flex-start}
+.file b{font-size:12px;background:var(--carte);border:1px solid var(--trait);border-radius:5px;padding:2px 6px}
+.file b:first-child{border-color:var(--cyan);color:var(--cyan)}
+.file em{font-size:12px;color:var(--gris);font-style:normal}
+.prochaine{font-size:13px;color:var(--gris)}
+.go{background:var(--run);font-size:16px;padding:12px}
+.nok{background:var(--panne);font-size:13px;padding:8px 6px}
+.qual{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.qual .go{grid-column:1/-1}
+.arrets{display:flex;gap:6px;flex-wrap:wrap}
+.arrets button{flex:1;font-size:12px;padding:6px;background:var(--zone);color:var(--encre);border:1px solid var(--trait)}
+.compteur{font-size:13px;color:var(--gris)}
+label.tab5{font-size:12px;color:var(--gris);display:flex;gap:6px;align-items:center}
+.livrees{margin-top:16px;background:var(--carte);border:1px solid var(--trait);border-radius:10px;padding:12px}
+.livrees h3{margin:0 0 8px;font-size:15px}
+.journal{font-size:13px;max-height:220px;overflow:auto}
+.journal div{border-bottom:1px dotted var(--trait);padding:2px 0}
+</style>
+</head>
+<body>
+<div class="cmjn" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+<header>
+  <h1>Pupitre des postes<small>Pilotage manuel de la mini-usine en mode RÉEL — un bouton = une coque qui sort du poste</small></h1>
+  <div class="cnx"><span class="pastille" id="pastille"></span><span id="txtCnx">déconnecté</span>
+    <label>Broker <input id="hote" size="13"></label><button id="btnCnx" style="background:var(--zone);color:var(--encre)">Se connecter</button></div>
+</header>
+<div class="banniere" id="banniere">
+  <span id="txtBanniere">La mini-usine est en mode SIM : le simulateur fabrique les coques. Pour piloter les postes à la main ou avec les Tab5, passez en mode RÉEL.</span>
+  <button id="btnReel">Passer en mode RÉEL + nouveau départ</button>
+</div>
+<main>
+  <div class="postes" id="postes"></div>
+  <div class="livrees"><h3>Journal du pupitre</h3><div class="journal" id="journal"></div></div>
+</main>
+<script>
+"use strict";
+const IDS = ["P1","P2","P3","P4","P5","P6"];
+const NOMS = { P1:"Alimentation & identification", P2:"Impression du visuel", P3:"Découpe du sticker", P4:"Pose robot & marouflage", P5:"Contrôle qualité caméra", P6:"Emballage & sortie" };
+const CAUSES = { P2:["bourrage papier","buses encrassées","encre vide"], P4:["ventouse usée","rouleau marouflage","défaut axe robot"] };
+const DEFAUTS = [["alignement","Alignement"],["bulle","Bulles"],["couleur","Couleur"],["rayure","Rayures"]];
+const ETAT_TXT = { RUN:"produit", ATTENTE:"attend", BLOQUE:"bloqué", PANNE:"en panne", MAINT:"maintenance" };
+const $ = id => document.getElementById(id);
+let client = null, mode = null;
+const F = {}, E = {}, N = {}, T = {}, TAB5 = {};      // files, états, compteurs, instant de la dernière coque, poste équipé d'une Tab5
+for (const id of IDS) { F[id] = []; E[id] = "ATTENTE"; N[id] = 0; T[id] = 0; TAB5[id] = false; }
+try { Object.assign(TAB5, JSON.parse(localStorage.getItem("pc_tab5") || "{}")); } catch(e){}
+
+function journal(txt){ const d = document.createElement("div"); d.textContent = new Date().toLocaleTimeString("fr-FR") + "  " + txt; $("journal").prepend(d); while ($("journal").children.length > 80) $("journal").lastChild.remove(); }
+function retirer(id, cmd){ const i = F[id].indexOf(cmd); if (i >= 0) F[id].splice(i, 1); }
+
+// ---------- affichage ----------
+function dessiner(){
+  let h = "";
+  for (const id of IDS) {
+    const off = TAB5[id] || mode !== "REEL", arret = E[id] === "PANNE" || E[id] === "MAINT";
+    const file = F[id].length ? F[id].map(c => `<b>${c}</b>`).join("") : `<em>aucune commande en attente</em>`;
+    let actions;
+    if (id === "P5") {
+      actions = `<div class="qual"><button class="go" data-ok="1" ${off || arret ? "disabled" : ""}>Contrôle OK</button>` +
+        DEFAUTS.map(([k, l]) => `<button class="nok" data-nok="${k}" ${off || arret ? "disabled" : ""}>NOK ${l}</button>`).join("") + `</div>`;
+    } else {
+      actions = `<button class="go" data-piece="${id}" ${off || arret ? "disabled" : ""}>Coque sortie de ${id}</button>`;
+    }
+    h += `<section class="poste ${E[id]}" data-id="${id}">
+      <h2>${id}<span>${NOMS[id]}</span></h2>
+      <div class="etat">${ETAT_TXT[E[id]] || E[id]}</div>
+      <div class="prochaine">File d'attente (${F[id].length}) — la 1re sera traitée :</div>
+      <div class="file">${file}</div>
+      ${actions}
+      <div class="arrets">
+        <button data-panne="${id}" ${off || E[id] === "PANNE" ? "disabled" : ""}>Panne</button>
+        <button data-maint="${id}" ${off || arret ? "disabled" : ""}>Maintenance</button>
+        <button data-reprise="${id}" ${off || !arret ? "disabled" : ""}>Remise en route</button>
+      </div>
+      <div class="compteur">coques sorties : <b>${N[id]}</b></div>
+      <label class="tab5"><input type="checkbox" data-tab5="${id}" ${TAB5[id] ? "checked" : ""}> poste piloté par une Tab5</label>
+    </section>`;
+  }
+  $("postes").innerHTML = h;
+  document.querySelectorAll("[data-piece]").forEach(b => b.onclick = () => coque(b.dataset.piece));
+  document.querySelectorAll("[data-ok]").forEach(b => b.onclick = () => controle(""));
+  document.querySelectorAll("[data-nok]").forEach(b => b.onclick = () => controle(b.dataset.nok));
+  document.querySelectorAll("[data-panne]").forEach(b => b.onclick = () => {
+    const id = b.dataset.panne, l = CAUSES[id] || ["convoyeur bloqué","capteur défaillant","autre"];
+    const r = prompt("Cause de la panne de " + id + " :\n" + l.map((c, i) => (i + 1) + " = " + c).join("\n"), "1");
+    if (r === null) return; etat(id, "PANNE", l[(Number(r) || 1) - 1] || l[0]); });
+  document.querySelectorAll("[data-maint]").forEach(b => b.onclick = () => etat(b.dataset.maint, "MAINT", "préventive"));
+  document.querySelectorAll("[data-reprise]").forEach(b => b.onclick = () => { T[b.dataset.reprise] = 0; etat(b.dataset.reprise, "ATTENTE", ""); });
+  document.querySelectorAll("[data-tab5]").forEach(c => c.onchange = () => { TAB5[c.dataset.tab5] = c.checked; try { localStorage.setItem("pc_tab5", JSON.stringify(TAB5)); } catch(e){} dessiner(); });
+  $("banniere").classList.toggle("vue", mode !== null && mode !== "REEL");
+}
+
+// ---------- actions (mêmes messages que les Tab5) ----------
+function pub(topic, obj){ if (client && client.connected) client.publish(topic, JSON.stringify(obj)); }
+function tc(id){ const now = Date.now(), ct = T[id] ? (now - T[id]) / 1000 : null; T[id] = now; return ct; }
+function coque(id){
+  const cmd = F[id][0] || "", ct = tc(id), msg = { cmd };
+  if (ct) msg.ct = +ct.toFixed(1);
+  if (E[id] !== "RUN") etat(id, "RUN", "");
+  pub("photocoque/poste/" + id + "/piece", msg);
+  journal(`${id} : coque sortie${cmd ? " (commande " + cmd + ")" : " (sans commande en file)"}`);
+}
+function controle(defaut){
+  const cmd = F.P5[0] || "", ct = tc("P5"), msg = { cmd };
+  if (ct) msg.ct = +ct.toFixed(1);
+  if (E.P5 !== "RUN") etat("P5", "RUN", "");
+  pub("photocoque/poste/P5/piece", msg);
+  pub("photocoque/qualite/resultat", { cmd, verdict: defaut ? "NOK" : "OK", defaut });
+  journal(`P5 : contrôle ${defaut ? "NOK (" + defaut + ") → commande refaite depuis P1" : "OK"}${cmd ? " — " + cmd : ""}`);
+}
+function etat(id, e, cause){ pub("photocoque/poste/" + id + "/etat", { etat: e, cause }); }
+
+// ---------- messages reçus : on reconstruit les files ----------
+function recevoir(topic, p){
+  if (topic === "photocoque/config") { mode = p.mode; $("txtBanniere").textContent = mode === "REEL" ? "" : "La mini-usine est en mode SIM : le simulateur fabrique les coques. Pour piloter les postes à la main ou avec les Tab5, passez en mode RÉEL."; dessiner(); return; }
+  if (topic === "photocoque/sim/cmd" && p.cmd === "reset") { for (const id of IDS) { F[id] = []; N[id] = 0; T[id] = 0; } journal("Nouveau départ : files et compteurs remis à zéro"); }
+  else if (topic === "photocoque/commande/new") { if (p.cmd && mode === "REEL") { F.P1.push(p.cmd); journal(`Nouvelle commande ${p.cmd} : ${p.modele || ""} — en file devant P1`); } }
+  else if (/^photocoque\/poste\/P[1-6]\/piece$/.test(topic)) {
+    const id = topic.split("/")[2], k = IDS.indexOf(id);
+    N[id] += 1;
+    if (p.cmd) { retirer(id, p.cmd); if (k <= 3) F[IDS[k + 1]].push(p.cmd); if (id === "P6") journal(`Commande ${p.cmd} livrée au client`); }
+  }
+  else if (topic === "photocoque/qualite/resultat") { if (p.cmd) { if (p.verdict === "NOK") F.P1.unshift(p.cmd); else F.P6.push(p.cmd); } }
+  else if (/^photocoque\/poste\/P[1-6]\/etat$/.test(topic)) { E[topic.split("/")[2]] = p.etat; }
+  dessiner();
+}
+
+// ---------- connexion ----------
+let h0; try { h0 = localStorage.getItem("pc_hote"); } catch(e){}
+$("hote").value = h0 || location.hostname || "localhost";
+function connecter(){
+  const h = $("hote").value.trim() || "localhost"; try { localStorage.setItem("pc_hote", h); } catch(e){}
+  if (client) client.end(true);
+  client = mqtt.connect("ws://" + h + ":9001", { clientId: "pupitre-" + Math.random().toString(16).slice(2, 8), reconnectPeriod: 3000 });
+  client.on("connect", () => { $("pastille").classList.add("ok"); $("txtCnx").textContent = "connecté à " + h;
+    client.subscribe(["photocoque/config","photocoque/sim/cmd","photocoque/commande/new","photocoque/poste/+/piece","photocoque/poste/+/etat","photocoque/qualite/resultat"]); });
+  client.on("close", () => { $("pastille").classList.remove("ok"); $("txtCnx").textContent = "déconnecté (Mosquitto, port 9001 ?)"; });
+  client.on("message", (t, b) => { let p; try { p = JSON.parse(b.toString()); } catch(e){ return; } recevoir(t, p); });
+}
+$("btnCnx").onclick = connecter;
+$("btnReel").onclick = () => { if (confirm("Passer la mini-usine en mode RÉEL et repartir de zéro ?")) { pub("photocoque/config/set", { mode: "REEL" }); pub("photocoque/sim/cmd", { cmd: "reset" }); } };
+function chargerMqtt(l){ if (!l.length) { $("txtCnx").textContent = "bibliothèque MQTT introuvable (lib/mqtt.min.js)"; return; }
+  const s = document.createElement("script"); s.src = l[0]; s.onload = connecter; s.onerror = () => chargerMqtt(l.slice(1)); document.head.append(s); }
+dessiner();
+chargerMqtt(["lib/mqtt.min.js", "mqtt.min.js", "mqtt_min.js"]);
+</script>
+</body>
+</html>
