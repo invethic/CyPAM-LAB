@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PhotoCoque Lab — supervision de la mini-usine</title>
+<!--
+  Supervision (IHM) de la mini-usine PhotoCoque.
+  Elle s'abonne en MQTT sur WebSockets (port 9001 de Mosquitto) à :
+    photocoque/kpi      indicateurs calculés par Node-RED (toutes les 2 s)
+    photocoque/config   configuration commune
+    photocoque/poste/#, photocoque/qualite/#  pour le fil des événements
+  et publie : photocoque/config/set, photocoque/sim/cmd, photocoque/kpi/reset
+  Fonctionne hors ligne : la bibliothèque MQTT est dans lib/mqtt.min.js
+-->
+<style>
+:root{
+  --papier:#f6f7f9; --carte:#ffffff; --encre:#1c2430; --gris:#5b6675; --trait:#d9dee5;
+  --cyan:#0097bd; --magenta:#c8236a; --jaune:#e9b800; --noir:#1c2430;
+  --run:#1f9d55; --attente:#d99a00; --bloque:#e06c00; --panne:#d22f2f; --maint:#2f6fd2;
+  --fond-zone:#eef1f5;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark){
+  :root{ --papier:#141a22; --carte:#1c2430; --encre:#e8edf3; --gris:#9aa6b4; --trait:#2e3a48;
+         --fond-zone:#222c39; color-scheme: dark; }
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--papier);color:var(--encre);
+  font-family:Bahnschrift,"DIN Alternate","Segoe UI",Roboto,Arial,sans-serif;font-size:15px;line-height:1.45}
+/* bande de contrôle couleur CMJN, comme sur une feuille d'imprimeur */
+.cmjn{display:flex;height:6px}.cmjn i{flex:1}
+.cmjn i:nth-child(1){background:var(--cyan)}.cmjn i:nth-child(2){background:var(--magenta)}
+.cmjn i:nth-child(3){background:var(--jaune)}.cmjn i:nth-child(4){background:var(--noir)}
+header{display:flex;flex-wrap:wrap;align-items:center;gap:12px 24px;padding:14px 22px;background:var(--carte);border-bottom:1px solid var(--trait)}
+header h1{font-size:22px;margin:0;font-weight:700;letter-spacing:.2px}
+header h1 small{display:block;font-size:13px;font-weight:400;color:var(--gris)}
+.cnx{margin-left:auto;display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:13px}
+.cnx input{width:140px}
+.pastille{width:11px;height:11px;border-radius:50%;background:var(--panne);display:inline-block}
+.pastille.ok{background:var(--run)}
+input,select,button{font:inherit;color:inherit}
+input,select{background:var(--carte);border:1px solid var(--trait);border-radius:6px;padding:5px 8px}
+button{background:var(--encre);color:var(--carte);border:0;border-radius:6px;padding:7px 14px;cursor:pointer;font-weight:600}
+button.leger{background:var(--fond-zone);color:var(--encre);border:1px solid var(--trait)}
+button:focus-visible,input:focus-visible,select:focus-visible,a:focus-visible{outline:3px solid var(--cyan);outline-offset:2px}
+nav{display:flex;flex-wrap:wrap;gap:4px;padding:10px 22px 0;background:var(--carte);border-bottom:1px solid var(--trait)}
+nav button{background:none;color:var(--gris);border-radius:8px 8px 0 0;padding:9px 14px;border-bottom:3px solid transparent;font-weight:600}
+nav button[aria-selected=true]{color:var(--encre);border-bottom-color:var(--magenta)}
+main{padding:20px 22px 40px;max-width:1280px;margin:0 auto}
+section[role=tabpanel]{display:none}section[role=tabpanel].actif{display:block}
+h2{font-size:19px;margin:6px 0 4px}
+.aide{color:var(--gris);margin:0 0 16px;max-width:78ch}
+.grille{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));margin-bottom:18px}
+.kpi{background:var(--carte);border:1px solid var(--trait);border-radius:10px;padding:12px 14px}
+.kpi b{display:block;font-size:26px;line-height:1.1}
+.kpi span{color:var(--gris);font-size:13px}
+.zone{background:var(--carte);border:1px solid var(--trait);border-radius:12px;padding:16px;margin-bottom:18px;overflow-x:auto}
+.zone h3{margin:0 0 10px;font-size:16px}
+/* ---- synoptique : le convoyeur, les postes et les stocks Kanban entre eux ---- */
+.ligne{display:flex;flex-wrap:wrap;row-gap:18px;align-items:stretch}
+.unite{display:flex;align-items:stretch;position:relative}
+.unite::before{content:"";position:absolute;left:0;right:0;top:50%;height:12px;margin-top:-6px;border-radius:6px;z-index:0;
+  background:repeating-linear-gradient(90deg,#b9c0c8 0 16px,#a8b0b9 16px 20px)}
+.unite:first-child::before{left:50%} .unite:last-child::before{right:50%}
+.poste{position:relative;z-index:1;width:168px;background:var(--carte);border:1px solid var(--trait);border-top:8px solid var(--gris);border-radius:8px;padding:10px 12px 10px}
+.poste h3{margin:0;font-size:15px;display:flex;justify-content:space-between;gap:6px}
+.poste h3 span{font-weight:400;color:var(--gris);font-size:12px;text-align:right;line-height:1.2}
+.poste .n{font-size:52px;font-weight:700;line-height:1;margin:6px 0 2px;font-variant-numeric:tabular-nums}
+.poste .meta{font-size:13px;color:var(--gris)}
+.poste .etat{font-size:12px;font-weight:700;margin-top:4px;min-height:17px}
+.tk{display:inline-block;margin-top:6px;padding:2px 7px;border-radius:4px;color:#fff;font-size:12px;background:var(--gris);font-variant-numeric:tabular-nums}
+.tk.ok{background:var(--run)} .tk.slow{background:var(--attente)} .tk.bad{background:var(--panne)}
+.muet{color:var(--panne);font-size:12px;margin-top:4px}
+.poste.extremite{border-top-color:var(--cyan);border-style:dashed;border-top-style:solid}
+.e-RUN{border-top-color:var(--run)} .e-RUN .etat{color:var(--run)}
+.e-ATTENTE{border-top-color:var(--attente)} .e-ATTENTE .etat{color:var(--attente)}
+.e-BLOQUE{border-top-color:var(--bloque)} .e-BLOQUE .etat{color:var(--bloque)}
+.e-PANNE{border-top-color:var(--panne);background:color-mix(in srgb,var(--panne) 8%,var(--carte))} .e-PANNE .etat{color:var(--panne)}
+.e-MAINT{border-top-color:var(--maint)} .e-MAINT .etat{color:var(--maint)}
+@media (prefers-reduced-motion:no-preference){ .e-PANNE{animation:clign 1.2s steps(2) infinite} }
+@keyframes clign{50%{border-top-color:var(--carte)}}
+/* stock tampon entre deux postes */
+.tampon{position:relative;z-index:1;width:104px;min-height:10px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;padding:0 4px}
+.cases{display:grid;grid-template-columns:repeat(4,14px);gap:3px;background:var(--fond-zone);padding:5px;border-radius:6px;border:1px solid var(--trait)}
+.case{width:14px;height:22px;border-radius:3px;background:var(--carte);border:1px solid var(--trait)}
+.case.p{border-color:transparent}
+.tampon.ok .case.p{background:var(--run)} .tampon.limite .case.p{background:var(--attente)} .tampon.trop .case.p{background:var(--panne)}
+.tampon .lab{font-size:13px;font-weight:700;background:var(--carte);padding:0 6px;border-radius:4px;font-variant-numeric:tabular-nums;text-align:center}
+.tampon.trop .lab{color:var(--panne)}
+.tampon .dit{font-size:11px;color:var(--gris);background:var(--carte);padding:0 5px;border-radius:4px;text-align:center}
+.bandeau{display:flex;flex-wrap:wrap;gap:10px 28px;margin-top:16px;padding-top:12px;border-top:1px solid var(--trait);font-size:14px;color:var(--gris)}
+.bandeau b{display:block;font-size:22px;color:var(--encre);font-variant-numeric:tabular-nums}
+.bandeau .alerte b{color:var(--panne)}
+.grid2{display:grid;grid-template-columns:minmax(0,3fr) minmax(0,2fr);gap:18px}
+@media (max-width:900px){.grid2{grid-template-columns:1fr}}
+.barre-cmd{display:grid;grid-template-columns:130px 1fr 92px;align-items:center;gap:10px;margin:7px 0;font-size:14px}
+.piste{height:14px;background:var(--fond-zone);border-radius:4px;overflow:hidden;position:relative}
+.piste i{position:absolute;left:0;top:0;bottom:0}
+.piste i.cmd{background:color-mix(in srgb,var(--cyan) 35%,var(--fond-zone))} .piste i.liv{background:var(--cyan)}
+.barre-cmd .v{text-align:right;font-variant-numeric:tabular-nums}
+.progression{height:18px;background:var(--fond-zone);border-radius:5px;overflow:hidden;position:relative;margin:6px 0 4px}
+.progression i{position:absolute;left:0;top:0;bottom:0;background:var(--run)}
+.progression s{position:absolute;top:-3px;bottom:-3px;width:3px;background:var(--encre);text-decoration:none}
+.livrees{display:flex;flex-wrap:wrap;gap:10px;margin-top:10px}
+.mini{display:flex;flex-direction:column;align-items:center;font-size:11px;color:var(--gris);width:62px;text-align:center}
+.mini i{width:30px;height:56px;border-radius:7px;border:3px solid var(--encre);margin-bottom:3px}
+.andon{max-height:420px;overflow:auto;font-size:14px}
+.andon div{padding:5px 8px;border-bottom:1px solid var(--fond-zone)}
+.andon time{color:var(--gris);margin-right:8px;font-variant-numeric:tabular-nums}
+.andon .a-PANNE{background:color-mix(in srgb,var(--panne) 12%,var(--carte))}
+.andon .a-NOK,.andon .a-KANBAN{background:color-mix(in srgb,var(--attente) 14%,var(--carte))}
+.andon .a-MAINT{background:color-mix(in srgb,var(--maint) 10%,var(--carte))}
+.andon .a-OK{background:color-mix(in srgb,var(--run) 10%,var(--carte))}
+table{border-collapse:collapse;width:100%;font-size:14px}
+th,td{border-bottom:1px solid var(--trait);padding:6px 8px;text-align:right;white-space:nowrap}
+th:first-child,td:first-child{text-align:left}
+th{color:var(--gris);font-weight:600}
+.flux{font-size:13px;max-height:280px;overflow:auto;font-variant-numeric:tabular-nums}
+.flux div{padding:2px 0;border-bottom:1px dotted var(--trait)}
+.legende{display:flex;flex-wrap:wrap;gap:14px;font-size:13px;color:var(--gris);margin-top:8px}
+.legende i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:5px;vertical-align:-1px}
+svg text{fill:var(--encre);font-family:inherit}
+.reglages{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px}
+.reglages label{display:flex;justify-content:space-between;align-items:center;gap:10px;margin:6px 0}
+.reglages input{width:100px;text-align:right}
+td input{width:76px;text-align:right}
+.actions{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0}
+.note{font-size:13px;color:var(--gris)}
+.mesure-vib{height:14px;border-radius:7px;background:var(--fond-zone);position:relative;min-width:160px}
+.mesure-vib i{position:absolute;left:0;top:0;bottom:0;border-radius:7px}
+.mesure-vib s{position:absolute;top:-3px;bottom:-3px;width:2px;background:var(--encre);text-decoration:none}
+a{color:var(--cyan)}
+</style>
+</head>
+<body>
+<div class="cmjn" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+<header>
+  <h1>PhotoCoque Lab<small>Mini-usine de coques personnalisées · supervision</small></h1>
+  <div class="cnx">
+    <span class="pastille" id="pastille" aria-hidden="true"></span><span id="txtCnx">déconnecté</span>
+    <label>Broker <input id="hote" aria-label="adresse du broker MQTT"></label>
+    <button class="leger" id="btnCnx">Se connecter</button>
+    <span id="modeInfo"></span>
+  </div>
+</header>
+<nav role="tablist" aria-label="vues">
+  <button role="tab" aria-selected="true" data-vue="ligne">Ligne</button>
+  <button role="tab" aria-selected="false" data-vue="d1">Défi 1 · Équilibrage</button>
+  <button role="tab" aria-selected="false" data-vue="d2">Défi 2 · Kanban</button>
+  <button role="tab" aria-selected="false" data-vue="d3">Défi 3 · TRS</button>
+  <button role="tab" aria-selected="false" data-vue="d4">Défi 4 · Maintenance</button>
+  <button role="tab" aria-selected="false" data-vue="d5">Défi 5 · Qualité</button>
+  <button role="tab" aria-selected="false" data-vue="reg">Simulateur & réglages</button>
+</nav>
+<main>
+
+<!-- ================= LIGNE ================= -->
+<section role="tabpanel" id="ligne" class="actif">
+  <h2 id="titreLigne">La mini-usine en direct</h2>
+  <p class="aide">Chaque carte est un poste : son nombre de coques sorties, sa cadence et son temps de cycle comparé au takt. Entre deux postes, les cases montrent le stock tampon (en-cours) : vert = on peut produire, orange = limite Kanban atteinte, rouge = accumulation.</p>
+  <div class="zone">
+    <div class="ligne" id="synoptique"></div>
+    <div class="legende"><span><i style="background:var(--run)"></i>produit</span><span><i style="background:var(--attente)"></i>attend une coque</span><span><i style="background:var(--bloque)"></i>bloqué (aval plein)</span><span><i style="background:var(--panne)"></i>en panne</span><span><i style="background:var(--maint)"></i>maintenance / réglage</span></div>
+    <div class="bandeau" id="bandeau"></div>
+  </div>
+  <div class="grid2">
+    <div class="zone">
+      <h3>Commandes clients</h3>
+      <div id="objectifJour"></div>
+      <div id="parModele"></div>
+      <h3 style="margin-top:14px">Dernières coques livrées</h3>
+      <div class="livrees" id="dernieres"><span class="note">Aucune coque livrée pour l'instant.</span></div>
+    </div>
+    <div class="zone">
+      <h3>Andon</h3>
+      <div class="andon" id="andon" aria-live="polite"><div class="note">Aucun appel Andon.</div></div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= DÉFI 1 ================= -->
+<section role="tabpanel" id="d1">
+  <h2>Défi 1 — Équilibrage de la ligne</h2>
+  <p class="aide">Diagramme de charge : chaque barre est le temps de cycle d'un poste (divisé par le nombre de machines). Tout poste au-dessus de la ligne du takt ne suit pas la demande client. Le plus haut est le goulot : c'est lui qui fixe la capacité de la mini-usine.</p>
+  <div class="grille" id="kpiD1"></div>
+  <div class="zone"><h3>Diagramme de charge des postes</h3><div id="grapheD1"></div>
+    <div class="legende"><span><i style="background:var(--cyan)"></i>temps de cycle de référence</span><span><i style="background:var(--magenta)"></i>temps mesuré</span><span><i style="background:var(--encre)"></i>takt</span></div></div>
+  <p class="note">Pour agir : onglet « Simulateur & réglages » → temps de cycle et nombre de machines. Le contenu de travail total doit rester justifié (on déplace des tâches, on n'en fait pas disparaître).</p>
+</section>
+
+<!-- ================= DÉFI 2 ================= -->
+<section role="tabpanel" id="d2">
+  <h2>Défi 2 — Réduction des en-cours (Kanban)</h2>
+  <p class="aide">Les en-cours sont les coques commencées mais pas encore livrées. Loi de Little : délai de traversée = en-cours moyen ÷ débit. Moins d'en-cours dans la ligne, c'est une coque prête plus vite pour le client.</p>
+  <div class="grille" id="kpiD2"></div>
+  <div class="zone"><h3>En-cours devant chaque poste</h3><div id="grapheD2"></div>
+    <div class="legende"><span><i style="background:var(--jaune)"></i>coques en attente</span><span><i style="background:var(--panne)"></i>limite Kanban (cartes)</span></div></div>
+  <p class="note">Pour agir : « Simulateur & réglages » → colonne « Kanban (stock max) » de chaque poste, et « CONWIP » (commandes lancées au maximum dans la ligne).</p>
+</section>
+
+<!-- ================= DÉFI 3 ================= -->
+<section role="tabpanel" id="d3">
+  <h2>Défi 3 — Mesure et amélioration du TRS</h2>
+  <p class="aide">TRS = Disponibilité × Performance × Qualité. Disponibilité : part du temps sans panne ni maintenance. Performance : pièces produites × temps de cycle de référence ÷ temps de fonctionnement. Qualité : coques bonnes ÷ coques contrôlées.</p>
+  <div class="grille" id="kpiD3"></div>
+  <div class="zone"><h3>TRS par poste</h3><div id="tableD3"></div></div>
+  <div class="zone"><h3>Répartition du temps de chaque poste</h3><div id="grapheD3"></div>
+    <div class="legende"><span><i style="background:var(--run)"></i>production</span><span><i style="background:var(--attente)"></i>attente</span><span><i style="background:var(--bloque)"></i>bloqué</span><span><i style="background:var(--panne)"></i>panne</span><span><i style="background:var(--maint)"></i>maintenance</span></div></div>
+</section>
+
+<!-- ================= DÉFI 4 ================= -->
+<section role="tabpanel" id="d4">
+  <h2>Défi 4 — Plan de maintenance préventive</h2>
+  <p class="aide">L'imprimante (P2) et le robot de pose (P4) tombent en panne d'autant plus souvent qu'ils sont usés. Une maintenance préventive arrête le poste quelques minutes mais remet l'usure à zéro. La vibration mesurée par la Tab5 monte avec l'usure : c'est un signal d'alerte.</p>
+  <div class="zone"><h3>Fiabilité des postes</h3><div id="tableD4"></div></div>
+  <div class="zone"><h3>Vibrations (mm/s RMS) et maintenance préventive</h3><div id="vibD4"></div>
+    <p class="note">Durée d'une maintenance préventive : <input id="dureeMaint" type="number" value="300" min="60" step="30" aria-label="durée maintenance en secondes"> s</p></div>
+</section>
+
+<!-- ================= DÉFI 5 ================= -->
+<section role="tabpanel" id="d5">
+  <h2>Défi 5 — Maîtrise de la qualité visuelle</h2>
+  <p class="aide">La caméra du poste 5 classe chaque coque OK ou NOK. Une coque NOK est jetée et la commande est refaite depuis le poste 1. Le Pareto montre la cause à traiter en premier ; la carte de contrôle p montre si le procédé est stable.</p>
+  <div class="grille" id="kpiD5"></div>
+  <div class="zone"><h3>Pareto des défauts</h3><div id="paretoD5"></div></div>
+  <div class="zone"><h3>Carte de contrôle p (proportion de NOK par lot)</h3><div id="carteD5"></div></div>
+  <div class="zone"><h3>Actions d'amélioration (simulateur)</h3>
+    <p class="note">Chaque action arrête le poste concerné le temps du réglage, puis réduit la cause de défaut associée. À justifier par votre analyse !</p>
+    <div class="actions">
+      <button class="leger" data-action="calibrage_robot">Recalibrer le robot (P4 · alignement)</button>
+      <button class="leger" data-action="reglage_rouleau">Régler la pression du rouleau (P4 · bulles)</button>
+      <button class="leger" data-action="profil_couleur">Refaire le profil couleur (P2 · couleur)</button>
+      <button class="leger" data-action="nettoyage_convoyeur">Nettoyer le convoyeur (P3 · rayures)</button>
+    </div></div>
+</section>
+
+<!-- ================= RÉGLAGES ================= -->
+<section role="tabpanel" id="reg">
+  <h2>Simulateur & réglages</h2>
+  <p class="aide">Ces réglages sont partagés par toute la mini-usine (Node-RED). Relevez l'état de départ AVANT de modifier quoi que ce soit, puis faites un « Nouveau départ » pour mesurer l'effet de votre amélioration. Chaque départ crée un nouveau journal CSV.</p>
+  <div class="actions">
+    <button id="btnStart">Démarrer</button><button class="leger" id="btnPause">Pause</button>
+    <button class="leger" id="btnReset">Nouveau départ (remise à zéro)</button>
+    <button class="leger" id="btnDefaut">Revenir à l'état de départ</button>
+    <a id="lienCsv" href="#" target="_blank" rel="noopener">Télécharger le journal CSV de la session</a>
+  </div>
+  <div class="reglages zone">
+    <div>
+      <h3>Mini-usine</h3>
+      <label>Mode <select id="r_mode"><option value="SIM">SIM (simulateur)</option><option value="REEL">RÉEL (Tab5 sur la ligne)</option></select></label>
+      <label>Vitesse du simulateur (×) <input id="r_vitesse" type="number" min="1" max="60"></label>
+      <label>Commandes automatiques <select id="r_auto"><option value="true">oui</option><option value="false">non (kiosque seul)</option></select></label>
+      <label>Demande client (coques / jour) <input id="r_demande" type="number" min="1"></label>
+      <label>Temps d'ouverture (s / jour) <input id="r_ouverture" type="number" min="3600" step="600"></label>
+      <label>CONWIP (0 = illimité) <input id="r_conwip" type="number" min="0"></label>
+    </div>
+    <div>
+      <h3>Probabilité de défaut au contrôle (%)</h3>
+      <label>Alignement <input id="r_d_alignement" type="number" step="0.1" min="0"></label>
+      <label>Bulles <input id="r_d_bulle" type="number" step="0.1" min="0"></label>
+      <label>Couleur <input id="r_d_couleur" type="number" step="0.1" min="0"></label>
+      <label>Rayures <input id="r_d_rayure" type="number" step="0.1" min="0"></label>
+      <h3>Seuils vibration (mm/s)</h3>
+      <label>Alerte <input id="r_v_alerte" type="number" step="0.1"></label>
+      <label>Danger <input id="r_v_danger" type="number" step="0.1"></label>
+    </div>
+  </div>
+  <div class="zone"><h3>Postes</h3><div id="tablePostes"></div></div>
+  <div class="actions"><button id="btnAppliquer">Appliquer les réglages</button><span class="note" id="msgReglage"></span></div>
+</section>
+</main>
+
+<script>
+"use strict";
+const IDS = ["P1","P2","P3","P4","P5","P6"];
+const COUL = {RUN:"var(--run)",ATTENTE:"var(--attente)",BLOQUE:"var(--bloque)",PANNE:"var(--panne)",MAINT:"var(--maint)"};
+const ETAT_TXT = {RUN:"produit",ATTENTE:"attend",BLOQUE:"bloqué",PANNE:"panne",MAINT:"maintenance"};
+const DEFAUT_TXT = {alignement:"Alignement",bulle:"Bulles",couleur:"Couleur",rayure:"Rayures"};
+let client = null, KPI = null, CFG = null, editionFaite = false;
+// mémoire locale de la page Ligne (remise à zéro à chaque « Nouveau départ »)
+const VISUELS = { vague:"linear-gradient(160deg,#ff7a18,#ffb800 40%,#ff3d7f 75%,#7b2ff7)", plage:"linear-gradient(180deg,#5ec8f2 0 45%,#2b8cc4 45% 60%,#f3d9a4 60%)",
+  chien:"radial-gradient(circle at 50% 42%,#d9a35b 0 22%,#b07a35 22% 30%,transparent 30%),linear-gradient(#9bd36b,#4f9a3a)", fleurs:"linear-gradient(#ff5a8a,#ff9f1c 50%,#5fae6e)",
+  montagne:"linear-gradient(160deg,#8fd0ff 45%,#ffffff 45% 52%,#6d7f99 52%)", neon:"repeating-linear-gradient(135deg,#ff2bd6 0 6px,#2bf5ff 6px 12px,#1c1c3a 12px 18px)",
+  marbre:"radial-gradient(ellipse at 20% 30%,#ffffff,#d8d8de 40%,#a9a9b6 70%,#ececf2)", rayures:"linear-gradient(90deg,#1e5fa8 0 35%,#ffffff 35% 65%,#1e5fa8 65%)",
+  "photo-perso":"linear-gradient(135deg,#444,#999 50%,#ddd)" };
+let MEM = nouvelleMemoire();
+function kpiVide(){
+  const noms = { P1:"Alimentation & identification", P2:"Impression du visuel", P3:"Découpe du sticker", P4:"Pose robot & marouflage", P5:"Contrôle qualité caméra", P6:"Emballage & sortie" };
+  const tc = { P1:35, P2:50, P3:40, P4:75, P5:30, P6:25 }, postes = {};
+  for (const id of IDS) postes[id] = { nom: noms[id], etat: "ATTENTE", cause: "", tcRef: tc[id], machines: 1, tcEffectif: tc[id], tcMesure: null, sorties: 0, wipMax: 0, enAmont: 0,
+    temps: { RUN:0, ATTENTE:0, BLOQUE:0, PANNE:0, MAINT:0 }, D:1, P:0, Q:1, TRS:0, pannes:0, MTBF:null, MTTR:null, vib:null, vibMax:null };
+  return { vide: true, mode: "—", t: 0, takt_s: 60, demande_j: 420, postes,
+    ligne: { goulot:"P4", capaciteTheo_j:336, capaciteObs_j:0, commandes:0, livrees:0, wip:0, wipMoyen:0, debit_h:0, leadMoyen_s:null, leadMin_s:null, leadMax_s:null,
+             little_s:null, wipLigne:0, wipLigneMoyen:0, traverseeMoyen_s:null, littleLigne_s:null, contenuTravail_s:255, TRS:0 },
+    qualite: { controles:0, ok:0, nok:0, tauxNOK:null, defauts:{ alignement:0, bulle:0, couleur:0, rayure:0 }, carteP:{ n:50, points:[], pbar:0, LSC:0, LIC:0 } },
+    maintenance: { seuils: { alerte:4, danger:6 } } };
+}
+KPI = kpiVide();
+function nouvelleMemoire(){ return { cmd: {}, modeles: {}, livrees: [], vu: {}, etatKanban: {}, andon: [] }; }
+const $ = id => document.getElementById(id);
+const pct = x => x === null || x === undefined ? "–" : (x * 100).toFixed(1).replace(".", ",") + " %";
+const num = (x, d = 0) => x === null || x === undefined ? "–" : Number(x).toFixed(d).replace(".", ",");
+const duree = s => { if (s === null || s === undefined) return "–"; s = Math.round(s); if (s < 120) return s + " s"; if (s < 7200) return Math.round(s / 60) + " min"; return (s / 3600).toFixed(1).replace(".", ",") + " h"; };
+const kpi = (val, lib) => `<div class="kpi"><b>${val}</b><span>${lib}</span></div>`;
+
+// ---------- onglets ----------
+document.querySelectorAll("nav button").forEach(b => b.addEventListener("click", () => {
+  document.querySelectorAll("nav button").forEach(x => x.setAttribute("aria-selected", x === b));
+  document.querySelectorAll("section[role=tabpanel]").forEach(s => s.classList.toggle("actif", s.id === b.dataset.vue));
+  dessiner();
+}));
+
+// ---------- connexion MQTT (WebSockets) ----------
+function hoteParDefaut(){ try { return localStorage.getItem("pc_hote") || location.hostname || "localhost"; } catch(e){ return location.hostname || "localhost"; } }
+$("hote").value = hoteParDefaut();
+function connecter(){
+  const hote = $("hote").value.trim() || "localhost";
+  try { localStorage.setItem("pc_hote", hote); } catch(e){}
+  if (client) client.end(true);
+  $("lienCsv").href = "http://" + hote + ":1880/photocoque/journal.csv";
+  client = mqtt.connect("ws://" + hote + ":9001", { clientId: "supervision-" + Math.random().toString(16).slice(2, 8), reconnectPeriod: 3000 });
+  client.on("connect", () => { $("pastille").classList.add("ok"); $("txtCnx").textContent = "connecté à " + hote;
+    client.subscribe(["photocoque/kpi","photocoque/config","photocoque/poste/+/etat","photocoque/poste/+/piece","photocoque/qualite/resultat","photocoque/commande/new","photocoque/sim/cmd"]); });
+  client.on("close", () => { $("pastille").classList.remove("ok"); $("txtCnx").textContent = "déconnecté (Mosquitto lancé ? port 9001 ?)"; });
+  client.on("message", (topic, buf) => {
+    let p; try { p = JSON.parse(buf.toString()); } catch(e){ return; }
+    if (topic === "photocoque/kpi") { KPI = p; dessiner(); }
+    else if (topic === "photocoque/config") { CFG = p; $("modeInfo").textContent = "mode " + p.mode; if (!editionFaite) remplirReglages(); }
+    else fluxEvenement(topic, p);
+  });
+}
+$("btnCnx").addEventListener("click", connecter);
+function publier(topic, obj){ if (client && client.connected) client.publish(topic, JSON.stringify(obj)); }
+
+// ---------- événements reçus : mémoire de la page Ligne + Andon ----------
+function andon(type, texte, t){
+  MEM.andon.unshift({ type, texte, t, h: new Date() });
+  if (MEM.andon.length > 80) MEM.andon.pop();
+  $("andon").innerHTML = MEM.andon.map(a => `<div class="a-${a.type}"><time>${a.t !== undefined ? "t=" + duree(a.t) : a.h.toLocaleTimeString("fr-FR")}</time>${a.texte}</div>`).join("");
+}
+function fluxEvenement(topic, p){
+  const id = topic.split("/")[2];
+  if (topic === "photocoque/sim/cmd") { if (p.cmd === "reset") { MEM = nouvelleMemoire(); $("andon").innerHTML = '<div class="note">Aucun appel Andon.</div>'; } return; }
+  if (/^photocoque\/poste\/P\d\//.test(topic)) MEM.vu[id] = Date.now();
+  if (topic === "photocoque/commande/new") {
+    const m = p.modele || "modèle ?";
+    MEM.cmd[p.cmd] = { modele: m, visuel: p.visuel || "", prenom: p.prenom || "" };
+    (MEM.modeles[m] = MEM.modeles[m] || { cmd: 0, liv: 0 }).cmd += 1;
+    if (p.src && p.src !== "sim") andon("OK", `Nouvelle commande <b>${p.cmd}</b> (${p.src}) : ${m}, visuel ${p.visuel || "?"}`, p.t);
+  } else if (topic === "photocoque/poste/P6/piece") {
+    const c = MEM.cmd[p.cmd];
+    if (c) { (MEM.modeles[c.modele] = MEM.modeles[c.modele] || { cmd: 0, liv: 0 }).liv += 1; delete MEM.cmd[p.cmd]; }
+    MEM.livrees.unshift({ cmd: p.cmd || "—", modele: c ? c.modele : "", visuel: c ? c.visuel : "", prenom: c ? c.prenom : "" });
+    if (MEM.livrees.length > 8) MEM.livrees.pop();
+    if (p.cmd && !/^C\d+$/.test(p.cmd)) andon("OK", `Coque livrée : commande <b>${p.cmd}</b>${c && c.prenom ? " pour " + c.prenom : ""}`, p.t);
+  } else if (topic.endsWith("/etat")) {
+    if (p.etat === "PANNE") andon("PANNE", `<b>${id}</b> en panne${p.cause ? " — " + p.cause : ""}`, p.t);
+    else if (p.etat === "MAINT") andon("MAINT", `<b>${id}</b> maintenance / réglage${p.cause ? " — " + p.cause : ""}`, p.t);
+  } else if (topic === "photocoque/qualite/resultat" && p.verdict === "NOK") {
+    andon("NOK", `Alerte qualité P5 : <b>${DEFAUT_TXT[p.defaut] || p.defaut || "défaut"}</b> — commande ${p.cmd || "?"} refaite`, p.t);
+  }
+}
+
+// ---------- petites fonctions SVG ----------
+function barres(donnees, opts){
+  // donnees : [{lib, valeurs:[{v, c}], max}] ; opts : {ligne, ligneLib, unite, hauteur, rouge}
+  const L = 760, H = opts.hauteur || 260, g = 40, b = 30, n = donnees.length, w = (L - g - 10) / n;
+  let vmax = opts.vmax || Math.max(1, opts.ligne || 0, ...donnees.flatMap(d => d.valeurs.map(x => x.v || 0)), ...donnees.map(d => d.limite || 0)) * 1.15;
+  const y = v => H - b - (v / vmax) * (H - b - 14);
+  let s = `<svg viewBox="0 0 ${L} ${H}" width="100%" role="img" aria-label="${opts.titre || "graphique"}">`;
+  for (let k = 0; k <= 4; k++) { const v = vmax * k / 4; s += `<line x1="${g}" x2="${L - 6}" y1="${y(v)}" y2="${y(v)}" stroke="var(--trait)"/><text x="${g - 6}" y="${y(v) + 4}" font-size="11" text-anchor="end">${num(v, vmax < 5 ? 1 : 0)}</text>`; }
+  donnees.forEach((d, i) => {
+    const x0 = g + i * w + w * 0.15, bw = (w * 0.7) / d.valeurs.length;
+    d.valeurs.forEach((x, j) => { if (x.v === null || x.v === undefined) return;
+      s += `<rect x="${x0 + j * bw}" y="${y(x.v)}" width="${bw - 3}" height="${Math.max(H - b - y(x.v), 0)}" fill="${x.c}" rx="3"/>`;
+      s += `<text x="${x0 + j * bw + (bw - 3) / 2}" y="${y(x.v) - 4}" font-size="11" text-anchor="middle">${num(x.v, x.v < 5 && x.v % 1 ? 1 : 0)}</text>`; });
+    if (d.limite) s += `<line x1="${x0 - 4}" x2="${x0 + w * 0.7 + 4}" y1="${y(d.limite)}" y2="${y(d.limite)}" stroke="var(--panne)" stroke-width="3"/>`;
+    s += `<text x="${g + i * w + w / 2}" y="${H - 10}" font-size="12" text-anchor="middle" font-weight="${d.gras ? 700 : 400}">${d.lib}</text>`;
+  });
+  if (opts.ligne) s += `<line x1="${g}" x2="${L - 6}" y1="${y(opts.ligne)}" y2="${y(opts.ligne)}" stroke="var(--encre)" stroke-width="2" stroke-dasharray="7 5"/><text x="${L - 8}" y="${y(opts.ligne) - 6}" font-size="12" text-anchor="end" font-weight="700">${opts.ligneLib}</text>`;
+  return s + "</svg>";
+}
+
+// ---------- rendu ----------
+function dessiner(){
+  if (!KPI) return;
+  const P = KPI.postes, L = KPI.ligne, Q = KPI.qualite;
+  const vue = document.querySelector("section.actif").id;
+
+  // Ligne
+  if (vue === "ligne") dessinerLigne();
+  // Défi 1
+  if (vue === "d1") {
+    $("kpiD1").innerHTML = kpi(num(KPI.takt_s) + " s", "takt (ouverture ÷ demande)") + kpi(L.goulot, "goulot") + kpi(num(P[L.goulot].tcEffectif) + " s", "temps de cycle du goulot")
+      + kpi(L.capaciteTheo_j, "capacité théorique (coques/jour)") + kpi(KPI.demande_j, "demande (coques/jour)") + kpi(L.contenuTravail_s + " s", "contenu de travail total");
+    $("grapheD1").innerHTML = barres(IDS.map(id => ({ lib: id + (P[id].machines > 1 ? " ×" + P[id].machines : ""), gras: id === L.goulot,
+      valeurs: [{ v: P[id].tcEffectif, c: "var(--cyan)" }, { v: P[id].tcMesure === null ? null : P[id].tcMesure / P[id].machines, c: "var(--magenta)" }] })),
+      { ligne: KPI.takt_s, ligneLib: "takt " + num(KPI.takt_s) + " s", titre: "diagramme de charge" });
+  }
+  // Défi 2
+  if (vue === "d2") {
+    $("kpiD2").innerHTML = kpi(L.wipLigne, "en-cours dans la ligne (coques)") + kpi(num(L.wipLigneMoyen, 1), "en-cours moyen dans la ligne") + kpi(num(L.debit_h, 1), "débit (coques / heure)")
+      + kpi(duree(L.traverseeMoyen_s), "délai de traversée mesuré") + kpi(duree(L.littleLigne_s), "délai calculé (Little)") + kpi(L.wip, "commandes non livrées")
+      + kpi(duree(L.leadMoyen_s), "délai client (commande → livraison)");
+    $("grapheD2").innerHTML = barres(IDS.map(id => ({ lib: "avant " + id, limite: P[id].wipMax || 0, valeurs: [{ v: P[id].enAmont, c: "var(--jaune)" }] })), { titre: "en-cours par poste" });
+  }
+  // Défi 3
+  if (vue === "d3") {
+    const p5 = P.P5;
+    $("kpiD3").innerHTML = kpi(pct(L.TRS), "TRS ligne (temps utile ÷ temps requis)") + kpi(pct(P[L.goulot].TRS), "TRS du goulot (" + L.goulot + ")")
+      + kpi(pct(P[L.goulot].D), "disponibilité du goulot") + kpi(pct(P[L.goulot].P), "performance du goulot") + kpi(pct(p5.Q), "qualité (contrôle P5)");
+    let t = "<table><thead><tr><th>Poste</th><th>Disponibilité</th><th>Performance</th><th>Qualité</th><th>TRS</th><th>Pièces</th><th>Panne</th><th>Maint.</th><th>Attente</th><th>Bloqué</th></tr></thead><tbody>";
+    for (const id of IDS) { const p = P[id]; t += `<tr><td>${id} — ${p.nom}</td><td>${pct(p.D)}</td><td>${pct(p.P)}</td><td>${pct(p.Q)}</td><td><b>${pct(p.TRS)}</b></td><td>${p.sorties}</td><td>${duree(p.temps.PANNE)}</td><td>${duree(p.temps.MAINT)}</td><td>${duree(p.temps.ATTENTE)}</td><td>${duree(p.temps.BLOQUE)}</td></tr>`; }
+    $("tableD3").innerHTML = t + "</tbody></table>";
+    const Lg = 760, hb = 26; let s = `<svg viewBox="0 0 ${Lg} ${IDS.length * (hb + 10) + 10}" width="100%" role="img" aria-label="répartition des temps">`;
+    IDS.forEach((id, i) => { const tp = P[id].temps, tot = Object.values(tp).reduce((a, b) => a + b, 0) || 1; let x = 50;
+      s += `<text x="0" y="${i * (hb + 10) + 28}" font-size="13" font-weight="700">${id}</text>`;
+      for (const e of ["RUN", "ATTENTE", "BLOQUE", "PANNE", "MAINT"]) { const w = (tp[e] || 0) / tot * (Lg - 60); if (w > 0) s += `<rect x="${x}" y="${i * (hb + 10) + 10}" width="${w}" height="${hb}" fill="${COUL[e]}"><title>${ETAT_TXT[e]} : ${duree(tp[e])}</title></rect>`; x += w; } });
+    $("grapheD3").innerHTML = s + "</svg>";
+  }
+  // Défi 4
+  if (vue === "d4") {
+    let t = "<table><thead><tr><th>Poste</th><th>État</th><th>Pannes</th><th>MTBF</th><th>MTTR</th><th>Disponibilité</th><th>Temps en panne</th><th>Maintenance</th></tr></thead><tbody>";
+    for (const id of IDS) { const p = P[id]; t += `<tr><td>${id} — ${p.nom}</td><td>${ETAT_TXT[p.etat]}${p.cause ? " (" + p.cause + ")" : ""}</td><td>${p.pannes}</td><td>${duree(p.MTBF)}</td><td>${duree(p.MTTR)}</td><td>${pct(p.D)}</td><td>${duree(p.temps.PANNE)}</td><td>${duree(p.temps.MAINT)}</td></tr>`; }
+    $("tableD4").innerHTML = t + "</tbody></table>";
+    const se = KPI.maintenance.seuils, vmax = se.danger * 1.5;
+    let v = "<table><thead><tr><th>Poste</th><th>Vibration actuelle</th><th>Max relevé</th><th style='text-align:left'>Niveau</th><th></th></tr></thead><tbody>";
+    for (const id of ["P2", "P4"]) { const p = P[id], r = p.vib || 0, c = r >= se.danger ? "var(--panne)" : r >= se.alerte ? "var(--attente)" : "var(--run)";
+      v += `<tr><td>${id} — ${p.nom}</td><td><b>${num(p.vib, 2)}</b></td><td>${num(p.vibMax, 2)}</td>
+        <td style="text-align:left"><div class="mesure-vib" title="alerte ${se.alerte} · danger ${se.danger}"><i style="width:${Math.min(r / vmax, 1) * 100}%;background:${c}"></i><s style="left:${se.alerte / vmax * 100}%"></s><s style="left:${se.danger / vmax * 100}%"></s></div></td>
+        <td><button class="leger" data-maint="${id}">Maintenance préventive ${id}</button></td></tr>`; }
+    $("vibD4").innerHTML = v + "</tbody></table>";
+    document.querySelectorAll("[data-maint]").forEach(b => b.onclick = () => publier("photocoque/sim/cmd", { cmd: "maintenance", poste: b.dataset.maint, duree_s: Number($("dureeMaint").value) || 300 }));
+  }
+  // Défi 5
+  if (vue === "d5") {
+    $("kpiD5").innerHTML = kpi(Q.controles, "coques contrôlées") + kpi(Q.nok, "coques NOK (rebut)") + kpi(pct(Q.tauxNOK), "taux de NOK") + kpi(pct(Q.carteP.pbar), "p̄ (moyenne des lots)") + kpi(pct(Q.carteP.LSC), "limite supérieure de contrôle");
+    const def = Object.entries(Q.defauts).sort((a, b) => b[1] - a[1]), tot = def.reduce((a, d) => a + d[1], 0) || 1;
+    const L2 = 760, H2 = 260, g = 40, b = 30, w = (L2 - g - 50) / def.length, vmax = Math.max(1, def[0] ? def[0][1] : 1) * 1.15;
+    const y = v => H2 - b - v / vmax * (H2 - b - 14), yc = c => H2 - b - c * (H2 - b - 14);
+    let s = `<svg viewBox="0 0 ${L2} ${H2}" width="100%" role="img" aria-label="Pareto des défauts">`, cum = 0, pts = [];
+    def.forEach(([k, v], i) => { const x = g + i * w + w * 0.15; cum += v; pts.push([g + i * w + w / 2, yc(cum / tot)]);
+      s += `<rect x="${x}" y="${y(v)}" width="${w * 0.7}" height="${H2 - b - y(v)}" fill="var(--magenta)" rx="3"/><text x="${x + w * 0.35}" y="${y(v) - 4}" font-size="12" text-anchor="middle">${v}</text><text x="${g + i * w + w / 2}" y="${H2 - 10}" font-size="12" text-anchor="middle">${DEFAUT_TXT[k] || k}</text>`; });
+    s += `<polyline points="${pts.map(p => p.join(",")).join(" ")}" fill="none" stroke="var(--encre)" stroke-width="2"/>` + pts.map((p, i) => `<circle cx="${p[0]}" cy="${p[1]}" r="4" fill="var(--encre)"/>`).join("");
+    s += `<line x1="${g}" x2="${L2 - 40}" y1="${yc(0.8)}" y2="${yc(0.8)}" stroke="var(--gris)" stroke-dasharray="4 4"/><text x="${L2 - 36}" y="${yc(0.8) + 4}" font-size="11">80 %</text><text x="${L2 - 36}" y="${yc(1) + 4}" font-size="11">100 %</text>`;
+    $("paretoD5").innerHTML = s + "</svg>";
+    const C = Q.carteP, pts2 = C.points; let c;
+    if (!pts2.length) c = `<p class="note">La carte se remplit après ${C.n} contrôles (un point par lot de ${C.n} coques).</p>`;
+    else { const H3 = 240, L3 = 760, vm = Math.max(C.LSC, ...pts2) * 1.25 || 0.1, yy = v => H3 - 26 - v / vm * (H3 - 40), xx = i => 50 + i * ((L3 - 70) / Math.max(pts2.length - 1, 1));
+      c = `<svg viewBox="0 0 ${L3} ${H3}" width="100%" role="img" aria-label="carte de contrôle p">`;
+      for (const [v, lib, col, da] of [[C.LSC, "LSC", "var(--panne)", "6 4"], [C.pbar, "p̄", "var(--encre)", ""], [C.LIC, "LIC", "var(--panne)", "6 4"]])
+        c += `<line x1="50" x2="${L3 - 20}" y1="${yy(v)}" y2="${yy(v)}" stroke="${col}" stroke-dasharray="${da}"/><text x="44" y="${yy(v) + 4}" font-size="11" text-anchor="end">${lib} ${pct(v)}</text>`;
+      c += `<polyline points="${pts2.map((v, i) => xx(i) + "," + yy(v)).join(" ")}" fill="none" stroke="var(--cyan)" stroke-width="2"/>`;
+      c += pts2.map((v, i) => `<circle cx="${xx(i)}" cy="${yy(v)}" r="5" fill="${v > C.LSC ? "var(--panne)" : "var(--cyan)"}"><title>lot ${i + 1} : ${pct(v)}</title></circle>`).join("") + "</svg>"; }
+    $("carteD5").innerHTML = c;
+  }
+}
+function etatTampon(wip, max, machines){
+  // wip = coques devant le poste (file + coque en cours)
+  if (max > 0) {
+    if (wip > max + machines) return ["trop", "stop Kanban"];
+    if (wip >= max) return ["limite", "limite atteinte"];
+    return ["ok", "produire"];
+  }
+  if (wip > 10) return ["trop", "accumulation"];
+  if (wip > 3) return ["limite", "sans limite Kanban"];
+  return ["ok", "sans limite Kanban"];
+}
+function tampon(titre, wip, max, machines, cle){
+  const [cls, dit] = etatTampon(wip, max, machines);
+  // passage en « stop Kanban » : un appel Andon
+  if (!KPI.vide && cls === "trop" && max > 0 && MEM.etatKanban[cle] !== "trop") andon("KANBAN", `Stock ${titre} : ${wip} coques pour ${max} cartes — stop Kanban`, KPI.t);
+  MEM.etatKanban[cle] = cls;
+  const nbCases = max > 0 ? Math.min(Math.max(max, 1), 12) : 8;
+  let c = ""; for (let n = 0; n < nbCases; n++) c += `<span class="case ${n < wip ? "p" : ""}"></span>`;
+  const deb = wip > nbCases ? ` (+${wip - nbCases})` : "";
+  return `<div class="tampon ${cls}" title="Stock tampon ${titre}"><div class="cases">${c}</div>
+    <span class="lab">WIP ${wip} / ${max > 0 ? max : "∞"}${deb}</span><span class="dit">${dit}</span></div>`;
+}
+function dessinerLigne(){
+  const P = KPI.postes, L = KPI.ligne, Q = KPI.qualite, t = Math.max(KPI.t, 1), takt = KPI.takt_s;
+  const ouv = CFG ? CFG.ouverture_s : 25200;
+  $("titreLigne").textContent = KPI.vide ? "La mini-usine en direct — en attente des données (connectez-vous au broker, puis Démarrer)"
+                                          : "La mini-usine en direct — mode " + KPI.mode + " · t = " + duree(KPI.t);
+  // carte kiosque
+  let h = `<div class="unite"><article class="poste extremite"><h3>Kiosque<span>commandes clients</span></h3>
+     <div class="n">${L.commandes}</div><div class="meta">${num(L.commandes / (t / 3600), 1)} cmd / h · besoin ${num(3600 / takt, 1)}</div>
+     <div class="etat" style="color:var(--gris)">non livrées : ${L.wip}</div></article></div>`;
+  IDS.forEach((id, i) => {
+    const p = P[id], amont = i === 0 ? "kiosque → P1" : IDS[i - 1] + " → " + id;
+    let tk = "", tkc = "";
+    if (p.tcMesure) { const r = (p.tcMesure / p.machines) / takt; tkc = r <= 1 ? "ok" : r <= 1.15 ? "slow" : "bad"; tk = `TC ${num(p.tcMesure / p.machines, 1)} s / takt ${num(takt)} s`; }
+    const cad = p.sorties / (t / 3600);
+    const muet = KPI.mode === "REEL" && (!MEM.vu[id] || Date.now() - MEM.vu[id] > 120000);
+    const vib = (p.vib !== null && p.vib !== undefined) ? ` · vib ${num(p.vib, 1)} mm/s` : "";
+    h += `<div class="unite">${tampon(amont, p.enAmont, p.wipMax, p.machines, id)}
+      <article class="poste e-${p.etat}"><h3>${id}${p.machines > 1 ? " ×" + p.machines : ""}<span>${p.nom}</span></h3>
+        <div class="n">${p.sorties}</div>
+        <div class="meta">${num(cad, 1)} coques / h${vib}</div>
+        <div class="etat">${ETAT_TXT[p.etat] || p.etat}${p.cause ? " — " + p.cause : ""}</div>
+        ${tk ? `<span class="tk ${tkc}">${tk}</span>` : `<span class="tk">TC réf. ${p.tcEffectif} s</span>`}
+        ${muet ? `<div class="muet">Tab5 silencieuse depuis plus de 2 min</div>` : ""}
+      </article></div>`;
+  });
+  // carte de sortie (le stock P5 → P6 est affiché devant P6)
+  h += `<div class="unite"><div class="tampon"></div><article class="poste extremite"><h3>Livraison<span>client</span></h3><div class="n">${L.livrees}</div>
+     <div class="meta">délai moyen ${duree(L.leadMoyen_s)}</div><div class="etat" style="color:var(--gris)">min ${duree(L.leadMin_s)} · max ${duree(L.leadMax_s)}</div></article></div>`;
+  $("synoptique").innerHTML = h;
+
+  // bandeau d'indicateurs
+  const attendu = Math.round(KPI.demande_j * Math.min(t / ouv, 1e9));
+  let goulotObs = null; IDS.forEach(id => { if (!goulotObs || P[id].enAmont > P[goulotObs].enAmont) goulotObs = id; });
+  const item = (val, lib, alerte) => `<span class="${alerte && !KPI.vide ? "alerte" : ""}"><b>${val}</b>${lib}</span>`;
+  $("bandeau").innerHTML =
+    item(L.livrees + " / " + attendu, "livrées / attendues à ce stade", L.livrees < attendu * 0.95) +
+    item(L.wipLigne, "en-cours dans la ligne", L.wipLigne > 10) +
+    item(num(L.debit_h, 1) + " / " + num(3600 / takt, 1), "coques/h : débit / besoin", L.debit_h < 3600 / takt * 0.95) +
+    item(L.goulot + " (" + num(P[L.goulot].tcEffectif) + " s)", "goulot théorique", P[L.goulot].tcEffectif > takt) +
+    item(P[goulotObs].enAmont ? goulotObs : "—", "plus gros stock devant", false) +
+    item(duree(L.traverseeMoyen_s), "délai de traversée", false) +
+    item(pct(L.TRS), "TRS ligne", L.TRS < 0.65) +
+    item(pct(Q.tauxNOK), "coques NOK", Q.tauxNOK > 0.03);
+
+  // objectif du jour + commandes par modèle
+  const prog = Math.min(L.livrees / KPI.demande_j, 1), rep = Math.min(t / ouv, 1);
+  $("objectifJour").innerHTML = `<div class="note">Objectif de la journée : ${KPI.demande_j} coques — ${L.livrees} livrées (${pct(prog)}) ; trait noir = où l'on devrait en être (${pct(rep)} de la journée écoulée).</div>
+    <div class="progression"><i style="width:${prog * 100}%;${prog < rep * 0.95 ? "background:var(--attente)" : ""}"></i><s style="left:calc(${rep * 100}% - 1px)"></s></div>`;
+  const mods = Object.entries(MEM.modeles).sort((a, b) => b[1].cmd - a[1].cmd).slice(0, 8);
+  const mx = Math.max(1, ...mods.map(m => m[1].cmd));
+  $("parModele").innerHTML = mods.length ? `<div class="legende" style="margin-bottom:4px"><span><i style="background:color-mix(in srgb,var(--cyan) 35%,var(--fond-zone))"></i>commandées</span><span><i style="background:var(--cyan)"></i>livrées</span></div>` +
+    mods.map(([m, v]) => `<div class="barre-cmd"><span>${m}</span><div class="piste"><i class="cmd" style="width:${v.cmd / mx * 100}%"></i><i class="liv" style="width:${v.liv / mx * 100}%"></i></div><span class="v">${v.liv} / ${v.cmd}</span></div>`).join("")
+    : `<p class="note">Les commandes par modèle s'affichent dès les premières commandes reçues (page ouverte avant le démarrage).</p>`;
+  if (MEM.livrees.length) $("dernieres").innerHTML = MEM.livrees.map(l => `<div class="mini"><i style="background:${VISUELS[l.visuel] || "var(--fond-zone)"}"></i>${l.cmd}<br>${l.modele || ""}</div>`).join("");
+}
+
+document.querySelectorAll("[data-action]").forEach(b => b.addEventListener("click", () => publier("photocoque/sim/cmd", { cmd: "action", action: b.dataset.action })));
+
+// ---------- réglages ----------
+function remplirReglages(){
+  if (!CFG) return;
+  $("r_mode").value = CFG.mode; $("r_vitesse").value = CFG.vitesse; $("r_auto").value = String(CFG.autoCommandes);
+  $("r_demande").value = CFG.demande_j; $("r_ouverture").value = CFG.ouverture_s; $("r_conwip").value = CFG.conwip;
+  for (const d of ["alignement", "bulle", "couleur", "rayure"]) $("r_d_" + d).value = +(CFG.defauts[d] * 100).toFixed(2);
+  $("r_v_alerte").value = CFG.vibration.alerte; $("r_v_danger").value = CFG.vibration.danger;
+  let t = "<table><thead><tr><th>Poste</th><th>Temps de cycle (s)</th><th>Machines</th><th>Kanban (stock max, 0 = illimité)</th><th>MTBF (s)</th><th>MTTR (s)</th></tr></thead><tbody>";
+  for (const id of IDS) { const p = CFG.postes[id];
+    t += `<tr><td>${id} — ${p.nom}</td><td><input data-p="${id}" data-k="tc" type="number" min="1" value="${p.tc}"></td><td><input data-p="${id}" data-k="machines" type="number" min="1" max="4" value="${p.machines}"></td>
+      <td><input data-p="${id}" data-k="wipMax" type="number" min="0" value="${p.wipMax}"></td><td><input data-p="${id}" data-k="mtbf_s" type="number" min="0" step="60" value="${p.mtbf_s}"></td><td><input data-p="${id}" data-k="mttr_s" type="number" min="0" step="30" value="${p.mttr_s}"></td></tr>`; }
+  $("tablePostes").innerHTML = t + "</tbody></table>";
+  document.querySelectorAll("#reg input, #reg select").forEach(e => e.oninput = () => { editionFaite = true; $("msgReglage").textContent = "modifications non appliquées"; });
+}
+$("btnAppliquer").addEventListener("click", () => {
+  const n = id => Number($(id).value);
+  const c = { mode: $("r_mode").value, vitesse: n("r_vitesse"), autoCommandes: $("r_auto").value === "true", demande_j: n("r_demande"), ouverture_s: n("r_ouverture"), conwip: n("r_conwip"),
+    defauts: {}, vibration: { alerte: n("r_v_alerte"), danger: n("r_v_danger") }, postes: {} };
+  for (const d of ["alignement", "bulle", "couleur", "rayure"]) c.defauts[d] = n("r_d_" + d) / 100;
+  document.querySelectorAll("#tablePostes input").forEach(e => { (c.postes[e.dataset.p] = c.postes[e.dataset.p] || {})[e.dataset.k] = Number(e.value); });
+  publier("photocoque/config/set", c); editionFaite = false; $("msgReglage").textContent = "réglages envoyés à Node-RED";
+});
+$("btnStart").onclick = () => publier("photocoque/sim/cmd", { cmd: "start" });
+$("btnPause").onclick = () => publier("photocoque/sim/cmd", { cmd: "pause" });
+$("btnReset").onclick = () => { if (confirm("Remettre la mini-usine et les indicateurs à zéro ? Un nouveau journal CSV sera créé.")) publier("photocoque/sim/cmd", { cmd: "reset" }); };
+$("btnDefaut").onclick = () => { if (confirm("Revenir aux réglages de l'état de départ (dossier défis) ?")) { editionFaite = false; publier("photocoque/config/defaut", {}); } };
+
+// la bibliothèque MQTT peut être dans lib/mqtt.min.js, ou à côté de la page (mqtt.min.js / mqtt_min.js)
+function chargerMqtt(liste){
+  if (!liste.length) { $("txtCnx").textContent = "bibliothèque MQTT introuvable : placer mqtt.min.js dans le dossier lib/"; return; }
+  const sc = document.createElement("script"); sc.src = liste[0];
+  sc.onload = connecter; sc.onerror = () => chargerMqtt(liste.slice(1));
+  document.head.append(sc);
+}
+dessiner();                      // la ligne s'affiche tout de suite (valeurs à zéro) en attendant les données
+chargerMqtt(["lib/mqtt.min.js", "mqtt.min.js", "mqtt_min.js"]);
+</script>
+</body>
+</html>
